@@ -33,6 +33,9 @@ class Detect(nn.Module):
                 y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i].to(x[i].device)) * self.stride[i]  # xy
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
                 z.append(y.view(bs, -1, self.no))
+        
+        # print('ssss', self.training)
+        # raise
 
         return x if self.training else (torch.cat(z, 1), x)
 
@@ -123,7 +126,7 @@ class Model(nn.Module):
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
         m = self.model[-1]  # Detect() module
-        for f, s in zip(m.f, m.stride):  #  from
+        for f, s in zip(m.f, m.stride):  #  from
             mi = self.model[f % m.i]
             b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
             b[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
@@ -132,7 +135,7 @@ class Model(nn.Module):
 
     def _print_biases(self):
         m = self.model[-1]  # Detect() module
-        for f in sorted([x % m.i for x in m.f]):  #  from
+        for f in sorted([x % m.i for x in m.f]):  #  from
             b = self.model[f].bias.detach().view(m.na, -1).T  # conv.bias(255) to (3,85)
             print(('%g Conv2d.bias:' + '%10.3g' * 6) % (f, *b[:5].mean(1).tolist(), b[5:].mean()))
 

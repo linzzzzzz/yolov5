@@ -247,6 +247,10 @@ def train(hyp):
             # Forward
             pred = model(imgs)
 
+            # print('ssss pred.shape', pred[0].shape, pred[1].shape,pred[2].shape)
+            # print('ssss',type(model[-1]))
+            # raise
+
             # Loss
             loss, loss_items = compute_loss(pred, targets.to(device), model)
             if not torch.isfinite(loss):

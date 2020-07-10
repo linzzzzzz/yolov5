@@ -3,6 +3,124 @@ import json
 
 from models.experimental import *
 from utils.datasets import *
+import pickle
+from utils.utils import *
+
+
+def clamp(X, lower_limit, upper_limit):
+    return torch.max(torch.min(X, upper_limit), lower_limit)
+
+
+def attack_pgd(model, X, y, early_stop=False,
+               mixup=False, y_a=None, y_b=None, lam=None):
+
+    # pgd parameters
+    upper_limit, lower_limit = 1,0
+    epsilon = 1
+    alpha = 0.05
+    attack_iters = opt.pgd_iter
+    restarts = 1
+    norm = 'l_inf'
+
+    # patch parameters
+    patchSize = 155
+    start_x = 5
+    start_y = 5
+
+
+    # initialize a mask
+    mask = torch.zeros_like(X).cuda()
+    mask[:, :, start_y:start_y + patchSize, start_x:start_x + patchSize] = 1 # only the area with Patch is changed to all ones.
+
+    # init loss
+    # loss = torch.zeros(1).cuda()
+    # loss.requires_grad = True
+
+    # create pgh attack
+    max_loss = torch.zeros(y.shape[0]).cuda()
+    max_delta = torch.zeros_like(X).cuda()
+    for _ in range(restarts):
+        delta = torch.zeros_like(X).cuda()
+        if norm == "l_inf":
+            delta.uniform_(-epsilon, epsilon)
+        # elif norm == "l_2":
+        #     delta.normal_()
+        #     d_flat = delta.view(delta.size(0),-1)
+        #     n = d_flat.norm(p=2,dim=1).view(delta.size(0),1,1,1)
+        #     r = torch.zeros_like(n).uniform_(0, 1)
+        #     delta *= r/n*epsilon
+        else:
+            raise ValueError
+
+
+        delta = clamp(delta, lower_limit-X, upper_limit-X)
+        delta.requires_grad = True
+
+        # zero out non-patch area
+        delta.data = delta.data * mask
+
+
+        for _ in range(attack_iters):
+            inf_out, train_out = model(X + delta)
+            # output = model(X)
+            # print('ssss pred shape',output[0].shape)
+            # if early_stop:
+            #     index = torch.where(output.max(1)[1] == y)[0]
+            # else:
+            index = slice(None,None,None)
+
+            if not isinstance(index, slice) and len(index) == 0:
+                break
+
+            # loss = F.cross_entropy(output, y)
+
+            # attack using full loss
+            # loss, loss_items = compute_loss(output, y, model)
+
+            # # attack using cls_loss
+            tgt_cls_idx = opt.tgt_cls_idx
+            # loss, loss_items = cls_loss(output, y, model, tgt_cls_idx)
+
+            loss = cls_loss([x.float() for x in train_out], y, model, tgt_cls_idx)[0]
+
+            print('ssss  loss', _, loss)
+
+
+
+            loss.backward()
+            grad = delta.grad.detach()
+            d = delta[index, :, :, :]
+            g = grad[index, :, :, :]
+            x = X[index, :, :, :]
+            if norm == "l_inf":
+                # d = torch.clamp(d + alpha * g, min=-epsilon, max=epsilon)
+                d = torch.clamp(d + alpha * torch.sign(g), min=-epsilon, max=epsilon)
+            elif norm == "l_2":
+                g_norm = torch.norm(g.view(g.shape[0],-1),dim=1).view(-1,1,1,1)
+                scaled_g = g/(g_norm + 1e-10)
+                d = (d + scaled_g*alpha).view(d.size(0),-1).renorm(p=2,dim=0,maxnorm=epsilon).view_as(d)
+            d = clamp(d, lower_limit - x, upper_limit - x)
+            delta.data[index, :, :, :] = d
+            delta.grad.zero_()
+
+            # zero out non-patch area
+            mask = torch.zeros_like(delta).cuda()
+            mask[:, :, start_y:start_y + patchSize, start_x:start_x + patchSize] = 1 # only the area with Patch is changed to all ones.
+            delta.data = delta.data * mask
+
+        # if mixup:
+        #     criterion = nn.CrossEntropyLoss(reduction='none')
+        #     all_loss = mixup_criterion(criterion, model((X+delta)), y_a, y_b, lam)
+        # else:
+        # all_loss = F.cross_entropy(model((X+delta)), y, reduction='none')
+
+        # max_delta[all_loss >= max_loss] = delta.detach()[all_loss >= max_loss]
+        # max_loss = torch.max(max_loss, all_loss)
+        max_delta = delta.detach()
+
+    return max_delta
+
+
 
 
 def test(data,
@@ -57,8 +175,11 @@ def test(data,
         img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
         _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
         path = data['test'] if opt.task == 'test' else data['val']  # path to val/test images
+        # ssss
+        # dataloader = create_dataloader(path, imgsz, batch_size, model.stride.max(), opt,
+        #                                hyp=None, augment=False, cache=False, pad=0.5, rect=True)[0]
         dataloader = create_dataloader(path, imgsz, batch_size, model.stride.max(), opt,
-                                       hyp=None, augment=False, cache=False, pad=0.5, rect=True)[0]
+                                       hyp=None, augment=False, cache=False, pad=0.5, rect=False)[0]
 
     seen = 0
     names = model.names if hasattr(model, 'names') else model.module.names
@@ -75,11 +196,65 @@ def test(data,
         nb, _, height, width = img.shape  # batch size, channels, height, width
         whwh = torch.Tensor([width, height, width, height]).to(device)
 
+
+
+        # ssss
+        data_cloned = img.clone()
+
+
+        # pgd attack
+        if opt.attack=='adv':
+            # # Hyperparameters
+            # hyp = {'giou': 3.54,  # giou loss gain
+            #        'cls': 37.4,  # cls loss gain
+            #        'cls_pw': 1.0,  # cls BCELoss positive_weight
+            #        'obj': 64.3,  # obj loss gain (*=img_size/320 if img_size != 320)
+            #        'obj_pw': 1.0,  # obj BCELoss positive_weight
+            #        'iou_t': 0.20,  # iou training threshold
+            #        # ssss
+            #         # 'lr0': 0.01,  # initial learning rate (SGD=5E-3, Adam=5E-4)
+            #        'lr0': 0.001,  # initial learning rate (SGD=5E-3, Adam=5E-4)
+            #        'lrf': 0.0005,  # final learning rate (with cos scheduler)
+            #        'momentum': 0.937,  # SGD momentum
+            #        'weight_decay': 0.0005,  # optimizer weight decay
+            #        'fl_gamma': 0.0,  # focal loss gamma (efficientDet default is gamma=1.5)
+            #        'hsv_h': 0.0138,  # image HSV-Hue augmentation (fraction)
+            #        'hsv_s': 0.678,  # image HSV-Saturation augmentation (fraction)
+            #        'hsv_v': 0.36,  # image HSV-Value augmentation (fraction)
+            #        'degrees': 1.98 * 0,  # image rotation (+/- deg)
+            #        'translate': 0.05 * 0,  # image translation (+/- fraction)
+            #        'scale': 0.05 * 0,  # image scale (+/- gain)
+            #        'shear': 0.641 * 0}  # image shear (+/- deg)
+
+            # data = opt.data
+            # data_dict = parse_data_cfg(data)
+            # nc = 1 if opt.single_cls else int(data_dict['classes'])  # number of classes
+            # hyp['cls'] *= nc / 80  # update coco-tuned hyp['cls'] to current dataset
+
+            # model.nc = nc  # attach number of classes to model
+            # model.hyp = hyp  # attach hyperparameters to model
+            # model.gr = 1.0  # giou loss ratio (obj_loss = 1.0 or giou)
+            # # model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device)  # attach class weights
+
+
+            pgd_delta = attack_pgd(model, img, targets)
+            data_cloned = data_cloned + pgd_delta
+
+
+
+
+
+
         # Disable gradients
         with torch.no_grad():
             # Run model
             t = torch_utils.time_synchronized()
-            inf_out, train_out = model(img, augment=augment)  # inference and training outputs
+            inf_out, train_out = model(data_cloned, augment=augment)  # inference and training outputs
+
+            # print('ssss img.shape',  img.shape)
+            # print('ssss inf_out.shape', inf_out.shape, len(train_out), train_out[0].shape, train_out[1].shape,train_out[2].shape)
+            # raise
+
             t0 += torch_utils.time_synchronized() - t
 
             # Compute loss
@@ -156,11 +331,14 @@ def test(data,
             stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
 
         # Plot images
-        if batch_i < 1:
+        if batch_i < 2:
             f = 'test_batch%g_gt.jpg' % batch_i  # filename
             plot_images(img, targets, paths, f, names)  # ground truth
             f = 'test_batch%g_pred.jpg' % batch_i
             plot_images(img, output_to_target(output, width, height), paths, f, names)  # predictions
+            if opt.attack!='None':
+                f = 'test_batch%g_pred_atk.jpg' % batch_i
+                plot_images(data_cloned, output_to_target(output, width, height), paths, f, names)  # predictions
 
     # Compute statistics
     stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy
@@ -195,23 +373,29 @@ def test(data,
         with open(f, 'w') as file:
             json.dump(jdict, file)
 
-        try:
-            from pycocotools.coco import COCO
-            from pycocotools.cocoeval import COCOeval
+        # try:
+        from pycocotools.coco import COCO
+        from pycocotools.cocoeval import COCOeval
 
-            # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
-            cocoGt = COCO(glob.glob('../coco/annotations/instances_val*.json')[0])  # initialize COCO ground truth api
-            cocoDt = cocoGt.loadRes(f)  # initialize COCO pred api
+        # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
+        cocoGt = COCO(glob.glob('../coco/annotations/instances_val*.json')[0])  # initialize COCO ground truth api
+        cocoDt = cocoGt.loadRes(f)  # initialize COCO pred api
 
-            cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
-            cocoEval.params.imgIds = imgIds  # image IDs to evaluate
-            cocoEval.evaluate()
-            cocoEval.accumulate()
-            cocoEval.summarize()
-            map, map50 = cocoEval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
-        except:
-            print('WARNING: pycocotools must be installed with numpy==1.17 to run correctly. '
-                  'See https://github.com/cocodataset/cocoapi/issues/356')
+        cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
+        cocoEval.params.imgIds = imgIds  # image IDs to evaluate
+
+        # ssss
+        if opt.tgt_cls!='None':
+            cocoEval.params.catIds = [opt.tgt_cls_id]
+
+
+        cocoEval.evaluate()
+        cocoEval.accumulate()
+        cocoEval.summarize()
+        map, map50 = cocoEval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
+        # except:
+        #     print('WARNING: pycocotools must be installed with numpy==1.17 to run correctly. '
+        #           'See https://github.com/cocodataset/cocoapi/issues/356')
 
     # Return results
     model.float()  # for training
@@ -236,9 +420,32 @@ if __name__ == '__main__':
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--merge', action='store_true', help='use Merge NMS')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
+
+    # ssss
+    parser.add_argument('--attack', type=str, default='None', help='what attack to use')
+    parser.add_argument('--tgt_cls', type=str, default='None', help='which class to attack')
+    parser.add_argument('--log', type=str, default='None', help='where to log results')
+    parser.add_argument('--pgd_iter', type=int, default=0, help='number of iterations for pgd attack')
+
     opt = parser.parse_args()
     opt.save_json = opt.save_json or opt.data.endswith('coco.yaml')
     opt.data = check_file(opt.data)  # check file
+
+    if opt.tgt_cls!='None':
+        with open('cls_map.pickle', 'rb') as handle:
+            cls_map = pickle.load(handle)
+        opt.tgt_cls_id = cls_map[opt.tgt_cls]
+
+        with open('clsIdx_map.pickle', 'rb') as handle:
+            clsIdx_map = pickle.load(handle)
+        opt.tgt_cls_idx = clsIdx_map[opt.tgt_cls]
+
+        opt.data = check_file(f'data/by_class/{opt.tgt_cls}.yaml')  # check file
+
+    else:
+        opt.data = check_file(opt.data)  # check file
+
+
     print(opt)
 
     # task = 'val', 'test', 'study'
