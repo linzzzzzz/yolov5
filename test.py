@@ -74,16 +74,26 @@ def attack_pgd(model, X, y, early_stop=False,
 
             # loss = F.cross_entropy(output, y)
 
-            # attack using full loss
-            # loss, loss_items = compute_loss(output, y, model)
+            if opt.attack == 'adv_full':
+                # attack using full loss
+                loss = compute_loss([x.float() for x in train_out], y, model)[0]
 
-            # # attack using cls_loss
-            tgt_cls_idx = opt.tgt_cls_idx
-            # loss, loss_items = cls_loss(output, y, model, tgt_cls_idx)
+            elif opt.attack == 'adv_cls':
+                # attack using cls_loss
+                tgt_cls_idx = opt.tgt_cls_idx
 
-            loss = cls_loss([x.float() for x in train_out], y, model, tgt_cls_idx)[0]
+                loss = cls_loss([x.float() for x in train_out], y, model, tgt_cls_idx)[0]
 
-            print('ssss  loss', _, loss)
+            elif opt.attack == 'adv_obj_sum':
+                loss = obj_loss_sum([x.float() for x in train_out], y, model)[0]
+            elif opt.attack == 'adv_obj_max':
+                loss = obj_loss_max([x.float() for x in train_out], y, model)[0]
+            elif opt.attack == 'adv_allcls_sum':
+                loss = allcls_loss_sum([x.float() for x in train_out], y, model)[0]
+            elif opt.attack == 'adv_allcls_max':
+                loss = allcls_loss_max([x.float() for x in train_out], y, model)[0]
+            # # track loss update
+            # print('ssss  loss', _, loss)
 
 
 
@@ -146,8 +156,8 @@ def test(data,
         merge = opt.merge  # use Merge NMS
 
         # Remove previous
-        for f in glob.glob('test_batch*.jpg'):
-            os.remove(f)
+        # for f in glob.glob('test_batch*.jpg'):
+        #     os.remove(f)
 
         # Load model
         model = attempt_load(weights, map_location=device)  # load FP32 model
@@ -203,7 +213,7 @@ def test(data,
 
 
         # pgd attack
-        if opt.attack=='adv':
+        if opt.attack[:3]=='adv':
             # # Hyperparameters
             # hyp = {'giou': 3.54,  # giou loss gain
             #        'cls': 37.4,  # cls loss gain
@@ -340,6 +350,18 @@ def test(data,
                 f = 'test_batch%g_pred_atk.jpg' % batch_i
                 plot_images(data_cloned, output_to_target(output, width, height), paths, f, names)  # predictions
 
+
+            # to_plot = '000000252219.jpg'
+            # if to_plot in [p.split('/')[-1] for p in paths]:
+            #     # get index
+            #     to_plot_idx = [p.split('/')[-1] for p in paths].index(to_plot)
+            #     plot_images(data_cloned[to_plot_idx:to_plot_idx+1], 
+            #     output_to_target(output[to_plot_idx:to_plot_idx+1], width, height), [paths[to_plot_idx]], to_plot, names)  # predictions
+
+            #     print('ssss paths', paths)
+            #     raise
+
+
     # Compute statistics
     stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy
     if len(stats):
@@ -367,8 +389,8 @@ def test(data,
     # Save JSON
     if save_json and map50 and len(jdict):
         imgIds = [int(Path(x).stem.split('_')[-1]) for x in dataloader.dataset.img_files]
-        f = 'detections_val2017_%s_results.json' % \
-            (weights.split(os.sep)[-1].replace('.pt', '') if isinstance(weights, str) else '')  # filename
+        f = 'results/detections_val2017_%s_%s_results.json' % \
+            (weights.split(os.sep)[-1].replace('.pt', '') if isinstance(weights, str) else '', opt.tgt_cls)  # filename
         print('\nCOCO mAP with pycocotools... saving %s...' % f)
         with open(f, 'w') as file:
             json.dump(jdict, file)
@@ -396,6 +418,12 @@ def test(data,
         # except:
         #     print('WARNING: pycocotools must be installed with numpy==1.17 to run correctly. '
         #           'See https://github.com/cocodataset/cocoapi/issues/356')
+
+        if opt.log != 'None':
+
+            with open(opt.log, 'a') as f:
+                # ssss
+                f.write(' '.join([str(r) for r in [opt.tgt_cls, opt.pgd_iter, *cocoEval.stats]]) + '\n')
 
     # Return results
     model.float()  # for training
